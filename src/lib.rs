@@ -52,6 +52,8 @@
 
 #![feature(custom_attribute)]
 #![feature(try_from)]
+#![feature(integer_atomics)]
+#![feature(atomic_min_max)]
 #![allow(unused_attributes)]
 
 #[macro_use]
@@ -71,18 +73,18 @@ extern crate hyper_tls;
 extern crate native_tls;
 extern crate serde;
 extern crate serde_json;
-extern crate tokio_core;
+extern crate tokio;
 extern crate uuid;
 
 #[macro_use]
 extern crate failure;
 
-pub use bot::RcBot;
+pub use bot::Bot;
 //pub use error::Error;
 pub use file::File;
 
 pub mod bot;
 pub mod error;
-pub mod objects;
-pub mod functions;
 pub mod file;
+pub mod functions;
+pub mod objects;
