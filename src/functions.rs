@@ -672,7 +672,7 @@ pub struct AnswerCallbackQuery {
 #[function = "answer_inline_query"]
 pub struct AnswerInlineQuery {
     inline_query_id: String,
-    results: Vec<Box<Serialize>>,
+    results: Vec<Box<Serialize + Send>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cache_time: Option<Integer>,
     #[serde(skip_serializing_if = "Option::is_none")]

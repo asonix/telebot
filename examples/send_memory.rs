@@ -1,23 +1,11 @@
 extern crate futures;
 extern crate telebot;
-extern crate tokio_core;
 
-use telebot::RcBot;
-use tokio_core::reactor::Core;
-use futures::stream::Stream;
+use futures::Future;
 use std::env;
+use telebot::{functions::*, Bot};
 
-// import all available functions
-use telebot::functions::*;
-
-fn main() {
-    // Create a new tokio core
-    let mut lp = Core::new().unwrap();
-
-    // Create the bot
-    let bot = RcBot::new(lp.handle(), &env::var("TELEGRAM_BOT_KEY").unwrap()).update_interval(200);
-
-    let text = r"
+static TEXT: &'static str = r"
 Dearest creature in creation,
 Study English pronunciation.
 I will teach you in my verse
@@ -51,15 +39,23 @@ Scene, Melpomene, mankind.
 
 ...";
 
-    let handle = bot.new_cmd("/send").and_then(move |(bot, msg)| {
-        bot.document(msg.chat.id)
-            .file(("poem.txt", text.as_bytes()))
-            .caption("The Chaos")
-            .send()
-    });
+fn main() {
+    // Create the bot
+    let mut bot = Bot::builder(&env::var("TELEGRAM_BOT_KEY").unwrap());
 
-    bot.register(handle);
+    bot.update_interval(200)
+        .new_cmd("/send", move |(bot, msg)| {
+            let fut = bot
+                .document(msg.chat.id)
+                .file(("poem.txt", TEXT.as_bytes()))
+                .caption("The Chaos")
+                .send()
+                .map(|_| ())
+                .map_err(|_| ());
+
+            Box::new(fut)
+        });
 
     // enter the main loop
-    bot.run(&mut lp).unwrap();
+    bot.run();
 }

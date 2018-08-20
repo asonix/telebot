@@ -18,6 +18,7 @@ use std::{
 };
 
 use futures::{
+    future::lazy,
     stream,
     sync::mpsc::{self, UnboundedSender},
     Future, IntoFuture, Stream,
@@ -38,8 +39,17 @@ pub struct BotBuilder {
     pub last_id: Arc<AtomicU32>,
     pub update_interval: u64,
     pub timeout: u64,
-    pub handlers: HashMap<String, UnboundedSender<(Bot, objects::Message)>>,
-    pub unknown_handler: Option<UnboundedSender<(Bot, objects::Message)>>,
+    pub handlers: HashMap<
+        String,
+        (
+            UnboundedSender<(Bot, objects::Message)>,
+            Box<dyn Future<Item = (), Error = ()> + Send>,
+        ),
+    >,
+    pub unknown_handler: Option<(
+        UnboundedSender<(Bot, objects::Message)>,
+        Box<dyn Future<Item = (), Error = ()> + Send>,
+    )>,
 }
 
 impl BotBuilder {
@@ -57,17 +67,22 @@ impl BotBuilder {
         }
     }
 
-    pub fn set_name(&mut self, name: &str) -> &mut Self {
+    pub fn name(&mut self, name: &str) -> &mut Self {
         self.name = Some(name.to_owned());
         self
     }
 
-    pub fn set_last_id(&mut self, last_id: u32) -> &mut Self {
+    pub fn last_id(&mut self, last_id: u32) -> &mut Self {
         self.last_id.store(last_id, Ordering::Relaxed);
         self
     }
 
-    pub fn set_timeout(&mut self, timeout: u64) -> &mut Self {
+    pub fn update_interval(&mut self, update_interval: u64) -> &mut Self {
+        self.update_interval = update_interval;
+        self
+    }
+
+    pub fn timeout(&mut self, timeout: u64) -> &mut Self {
         self.timeout = timeout;
         self
     }
@@ -88,14 +103,18 @@ impl BotBuilder {
             format!("/{}", cmd)
         };
 
-        self.handlers.insert(cmd.into(), sender);
-
-        tokio::executor::spawn(
-            receiver
-                .map_err(|_| ())
-                .and_then(handler)
-                .or_else(|_| Ok(()))
-                .for_each(|_| Ok(())),
+        self.handlers.insert(
+            cmd.into(),
+            (
+                sender,
+                Box::new(
+                    receiver
+                        .map_err(|_| ())
+                        .and_then(handler)
+                        .or_else(|_| Ok(()))
+                        .for_each(|_| Ok(())),
+                ),
+            ),
         );
 
         self
@@ -110,29 +129,76 @@ impl BotBuilder {
     ) -> &mut Self {
         let (sender, receiver) = mpsc::unbounded();
 
-        self.unknown_handler = Some(sender);
-
-        tokio::executor::spawn(
-            receiver
-                .map_err(|_| ())
-                .and_then(handler)
-                .or_else(|_| Ok(()))
-                .for_each(|_| Ok(())),
-        );
+        self.unknown_handler = Some((
+            sender,
+            Box::new(
+                receiver
+                    .map_err(|_| ())
+                    .and_then(handler)
+                    .or_else(|_| Ok(()))
+                    .for_each(|_| Ok(())),
+            ),
+        ));
 
         self
     }
 
-    pub fn build(&mut self) -> Bot {
-        Bot {
-            key: self.key.clone(),
-            name: self.name.clone(),
-            last_id: Arc::clone(&self.last_id),
-            update_interval: self.update_interval,
-            timeout: self.timeout,
-            handlers: self.handlers.clone(),
-            unknown_handler: self.unknown_handler.clone(),
-        }
+    pub fn build(&mut self) -> impl Future<Item = Bot, Error = Error> {
+        let key = self.key.clone();
+        let name = self.name.clone();
+        let last_id = Arc::clone(&self.last_id);
+        let update_interval = self.update_interval;
+        let timeout = self.timeout;
+        let handlers: HashMap<_, _> = self.handlers.drain().collect();
+        let mut unknown_handler = self.unknown_handler.take();
+
+        lazy(move || {
+            Ok(Bot {
+                key: key.clone(),
+                name: name.clone(),
+                last_id: Arc::clone(&last_id),
+                update_interval: update_interval,
+                timeout: timeout,
+                handlers: handlers
+                    .into_iter()
+                    .map(|(key, (sender, receiver))| {
+                        tokio::spawn(receiver);
+                        (key, sender)
+                    }).collect(),
+                unknown_handler: unknown_handler.take().map(|(sender, receiver)| {
+                    tokio::spawn(receiver);
+                    sender
+                }),
+            })
+        })
+    }
+
+    /// helper function to start the event loop
+    pub fn run(&mut self) {
+        let create_bot = self.build();
+
+        // create a new task which resolves the bot name and then set it in the struct
+        let resolve_name = create_bot.and_then(|bot| {
+            bot.clone().get_me().send().map(move |user| {
+                if let Some(new_name) = user.1.username {
+                    Bot {
+                        key: bot.key,
+                        name: Some(format!("@{}", new_name)),
+                        last_id: bot.last_id,
+                        update_interval: bot.update_interval,
+                        timeout: bot.timeout,
+                        handlers: bot.handlers,
+                        unknown_handler: bot.unknown_handler,
+                    }
+                } else {
+                    bot
+                }
+            })
+        });
+        // spawn the task
+        let fut = resolve_name.and_then(|bot| bot.get_stream().for_each(|_| Ok(())));
+
+        tokio::run(fut.map_err(|_| ()));
     }
 }
 
@@ -149,6 +215,10 @@ pub struct Bot {
 }
 
 impl Bot {
+    pub fn builder(key: &str) -> BotBuilder {
+        BotBuilder::new(key)
+    }
+
     /// Creates a new request and adds a JSON message to it. The returned Future contains a the
     /// reply as a string.  This method should be used if no file is added becontext a JSON msg is
     /// always compacter than a formdata one.
@@ -261,8 +331,7 @@ impl Bot {
         let bot2 = self.clone();
         let bot3 = self.clone();
 
-        let duration = Duration::from_millis(self.update_interval);
-        Interval::new(Instant::now(), duration)
+        Interval::new(Instant::now(), Duration::from_millis(self.update_interval))
             .map_err(|x| Error::from(x.context(ErrorKind::IntervalTimer)))
             .and_then(move |_| {
                 bot1.clone()
@@ -317,32 +386,6 @@ impl Bot {
                     return Some((bot3.clone(), val));
                 }
             })
-    }
-
-    /// helper function to start the event loop
-    pub fn run<'a>(self) {
-        // create a local copy of the bot to circumvent lifetime issues
-        let bot1 = self.clone();
-        // create a new task which resolves the bot name and then set it in the struct
-        let resolve_name = self.get_me().send().map(move |user| {
-            if let Some(new_name) = user.1.username {
-                Bot {
-                    key: bot1.key,
-                    name: Some(format!("@{}", new_name)),
-                    last_id: bot1.last_id,
-                    update_interval: bot1.update_interval,
-                    timeout: bot1.timeout,
-                    handlers: bot1.handlers,
-                    unknown_handler: bot1.unknown_handler,
-                }
-            } else {
-                bot1
-            }
-        });
-        // spawn the task
-        let fut = resolve_name.and_then(|bot| bot.get_stream().for_each(|_| Ok(())));
-
-        tokio::run(fut.map(|_| ()).map_err(|_| ()));
     }
 }
 

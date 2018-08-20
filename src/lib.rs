@@ -8,45 +8,37 @@
 //!
 //! ```
 //! extern crate telebot;
-//! extern crate tokio_core;
 //! extern crate futures;
-
-//! use telebot::bot;
-//! use tokio_core::reactor::Core;
-//! use futures::stream::Stream;
-//! use futures::Future;
-//! use std::fs::File;
+//! extern crate tokio;
 //!
-//! // import all available functions
-//! use telebot::functions::*;
+//! use futures::Future;
+//! use telebot::{functions::*, Bot};
+//! use tokio::runtime::Runtime;
 //!
 //! fn main() {
-//!     // create a new event loop
-//!     let mut lp = Core::new().unwrap();
-//!
 //!     // init the bot with the bot key and an update interval of 200ms
-//!     let bot = bot::RcBot::new(lp.handle(), "<TELEGRAM-BOT-TOKEN>")
-//!         .update_interval(200);
+//!     let bot = Bot::builder("<TELEGRAM-BOT-TOKEN>")
+//!         .update_interval(200)
+//!         // register a new command "reply" which replies all received messages
+//!         .new_cmd("/reply", |(bot, msg)| {
+//!             let mut text = msg.text.unwrap().clone();
 //!
-//!     // register a new command "reply" which replies all received messages
-//!     let handle = bot.new_cmd("/reply")
-//!     .and_then(|(bot, msg)| {
-//!         let mut text = msg.text.unwrap().clone();
+//!             // when the text is empty send a dummy text
+//!             if text.is_empty() {
+//!                 text = "<empty>".into();
+//!             }
 //!
-//!         // when the text is empty send a dummy text
-//!         if text.is_empty() {
-//!             text = "<empty>".into();
-//!         }
-//!
-//!         // construct a message and return a new future which will be resolved by tokio
-//!         bot.message(msg.chat.id, text).send()
-//!     });
-//!
-//!     // register the new command
-//!     bot.register(handle);
-//!
-//!     // start the event loop
-//!     bot.run(&mut lp).unwrap();
+//!             // construct a message and return a new future which will be resolved by tokio
+//!             Box::new(
+//!                 bot
+//!                     .message(msg.chat.id, text)
+//!                     .send()
+//!                     .map(|_| ())
+//!                     .map_err(|_| ())
+//!             )
+//!         })
+//!         // start the event loop
+//!         .run();
 //! }
 //! ```
 

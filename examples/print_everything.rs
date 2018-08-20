@@ -1,26 +1,26 @@
+#![recursion_limit = "128"]
+
 extern crate futures;
 extern crate telebot;
-extern crate tokio_core;
+extern crate tokio;
 
-use telebot::RcBot;
-use tokio_core::reactor::Core;
-use futures::stream::Stream;
+use futures::{Future, Stream};
 use std::env;
-use futures::IntoFuture;
+use telebot::Bot;
 
 fn main() {
-    // Create a new tokio core
-    let mut lp = Core::new().unwrap();
-
     // Create the bot
-    let bot = RcBot::new(lp.handle(), &env::var("TELEGRAM_BOT_KEY").unwrap()).update_interval(200);
+    let fut = Bot::builder(&env::var("TELEGRAM_BOT_KEY").unwrap())
+        .update_interval(200)
+        .build()
+        .and_then(|bot| {
+            bot.get_stream().for_each(|(_, msg)| {
+                println!("Received: {:#?}", msg);
 
-    let stream = bot.get_stream().and_then(|(_, msg)| {
-        println!("Received: {:#?}", msg);
-
-        Ok(())
-    });
+                Ok(())
+            })
+        });
 
     // enter the main loop
-    lp.run(stream.for_each(|_| Ok(())).into_future()).unwrap();
+    tokio::run(fut.map_err(|_| ()));
 }
